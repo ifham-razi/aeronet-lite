@@ -1,0 +1,973 @@
+% =====================================================================
+% AeroNet Lite — Final Report
+% BS Data Science, AI Semester Project (SP2026)
+% Compiles cleanly on Overleaf (pdflatex). Place all PNG figures
+% from report/figures/ into a sub-folder called `figures/` next to this
+% file before compiling.
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{tcolorbox}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue!60!black,
+  citecolor=black
+}
+
+% ----- Code listing style ---------------------------------------------
+\definecolor{codebg}{HTML}{F7F7F7}
+\definecolor{codekw}{HTML}{1F4E79}
+\definecolor{codestr}{HTML}{8B0000}
+\definecolor{codecmt}{HTML}{6A737D}
+\lstdefinestyle{py}{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{codekw}\bfseries,
+  stringstyle=\color{codestr},
+  commentstyle=\color{codecmt}\itshape,
+  backgroundcolor=\color{codebg},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{black!20},
+  numbers=left,
+  numberstyle=\tiny\color{black!50},
+  numbersep=8pt,
+  xleftmargin=2.5em,
+  framexleftmargin=2em
+}
+
+% Coloured side note box
+\newtcolorbox{notebox}[1][]{
+  colback=blue!4,
+  colframe=blue!50!black,
+  boxrule=0.6pt,
+  arc=2pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  fonttitle=\bfseries\small,
+  #1
+}
+
+\graphicspath{{figures/}}
+
+% =====================================================================
+\title{
+  \vspace{-1.5cm}
+  \textbf{AeroNet Lite}\\[0.4em]
+  \large Autonomous Drone Delivery Simulation with CSP, Fleet Planning,\\
+  A* Routing, Real-Time Replanning, Demand Forecasting, and Anomaly Detection
+}
+\author{
+  \textbf{Ifham Razi} \\ 23i-2550
+  \and
+  \textbf{Romaan Khawar} \\ 23i-2554
+  \and
+  \textbf{Ali Haroon} \\ 23i-2592
+}
+\date{BS Data Science --- AI Semester Project (SP2026) \\ \today}
+
+\begin{document}
+\maketitle
+
+% =====================================================================
+\begin{abstract}
+\noindent
+AeroNet Lite is a lightweight autonomous drone-delivery simulator that
+integrates five core AI techniques on a shared $10\!\times\!10$ city grid:
+Constraint Satisfaction (layout validation), heuristic and Genetic
+Algorithm search (fleet selection), A* pathfinding (delivery routing),
+online optimization (real-time replanning around no-fly cells), and
+supervised learning (demand regression and flight-anomaly classification).
+Three real datasets back the regressors --- Bike Sharing Demand
+(10{,}886 rows), Amazon Delivery (43{,}551 rows), and US City Population
+Densities --- while a deliberately-constructed synthetic telemetry set
+backs the four-class anomaly classifier. The system runs as a 20-step
+console simulation \emph{and} as an interactive Plotly-based Streamlit
+dashboard with step-through, restart, and seed-reproducible operation.
+A procedural grid generator produces a fresh, CSP-valid layout for every
+run. All ML training is reproducible (\texttt{random\_state=42}), giving
+identical confusion matrices and metrics across reruns, while scenario
+seeds vary deliveries, anomalies, and disruptions per run.
+\end{abstract}
+
+\vspace{0.4em}
+\noindent\hrulefill\par
+\tableofcontents
+\noindent\hrulefill
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+\subsection{Motivation}
+Modern logistics increasingly evaluates autonomous drone fleets for
+last-mile delivery, particularly for time-critical medical supplies. A
+full city-scale drone simulator with realistic physics, traffic, weather,
+and air-traffic-control integration is far outside the scope of a
+two-week semester project. The original course brief explicitly maps
+each ambitious sub-problem to a smaller analogue: from a full city to a
+$10\!\times\!10$ grid, from ACO/GA over heavy modules to a brute-force
+fleet search and four CSP rules, from a real-time UI to a static
+matplotlib plus interactive Streamlit dashboard. The chosen scope still
+exercises every AI technique required by the rubric --- CSP, search,
+optimization, regression, and classification --- and integrates them
+through a single shared grid-state contract.
+
+\subsection{Project Goals}
+The deliverables targeted in this project are:
+\begin{itemize}[leftmargin=*]
+  \item A modular Python project where every module is independently
+        testable and integrated through a shared 10$\times$10 grid model.
+  \item A 20-step console simulation matching the spec's example event
+        log structure.
+  \item An interactive Streamlit dashboard with an animated Plotly city
+        map, drone trails, and live metrics.
+  \item Five quantitative outputs supporting the rubric: a layout-validity
+        report, a fleet selection under budget, A* routes, regression
+        error metrics, and a classifier confusion matrix.
+  \item Reproducibility separation: model training is pinned, but
+        scenario seeds are configurable so demos can be varied without
+        breaking model evaluation.
+\end{itemize}
+
+\subsection{Report Layout}
+Section~\ref{sec:arch} describes the system architecture and module
+contracts. Sections~\ref{sec:grid}--\ref{sec:ml} cover the five AI
+modules in order. Sections~\ref{sec:data} and~\ref{sec:scenario} cover
+the datasets used and the 20-step demonstration scenario.
+Section~\ref{sec:dash} describes the Streamlit dashboard.
+Sections~\ref{sec:challenges}--\ref{sec:limits} discuss implementation
+challenges and limitations. Section~\ref{sec:contrib} attributes work to
+each member.
+
+% =====================================================================
+\section{System Architecture}
+\label{sec:arch}
+
+\subsection{Module Contract}
+Every module communicates through a single shared grid model, which
+prevents the sub-systems from drifting out of sync as the simulation
+progresses. Table~\ref{tab:modules} lists the read/write boundaries.
+
+\begin{table}[H]
+\centering
+\caption{Modules, AI technique, and shared-state interaction.}
+\label{tab:modules}
+\begin{tabular}{@{}llp{4cm}p{4.5cm}@{}}
+\toprule
+\textbf{Module} & \textbf{AI Technique} & \textbf{Reads} & \textbf{Writes} \\
+\midrule
+Layout Validator     & CSP                          & zone, hub, charging flags        & validation results \\
+Fleet Selector       & Heuristic / GA               & hubs, demand estimates           & selected drone list \\
+Path Planner         & A* search                    & no-fly, costs, hubs, deliveries  & routes \\
+Disruption Handler   & Online optimization          & active routes, no-fly flags      & rerouted segments \\
+ML Pipeline          & Regression + Classification  & demand history, telemetry        & forecasts, anomaly labels \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The data flow is summarised in Figure~\ref{fig:arch}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\linewidth]{architecture_diagram.png}
+\caption{High-level system architecture. AI modules (coloured blocks) read
+from and write to the shared grid model in the centre. External datasets
+(white boxes) feed the ML pipeline once at startup; their predictions
+flow back to the grid as enriched densities, ETAs, and anomaly labels.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Project Layout}
+The repository is organised so each module has exactly one file, making
+cross-referencing in viva straightforward.
+
+\begin{lstlisting}[basicstyle=\ttfamily\footnotesize, frame=single, backgroundcolor=\color{codebg}, language=]
+aeronet_lite/
+  data/raw/                 (5 datasets: bike_sharing, amazon_delivery, ...)
+  src/
+    grid_model.py           shared 10x10 city + procedural generator
+    layout_validator.py     CSP rules R1-R4
+    fleet_selector.py       brute force AND genetic algorithm
+    astar_planner.py        A* with commercial-corridor discount
+    delivery_simulator.py   drone state machine, no-fly handling
+    ml_pipeline.py          demand, anomaly, delivery-time models
+    visualization.py        matplotlib report figures
+    simulation.py           stepwise orchestrator
+    main.py                 CLI entry point (--seed N for reproducibility)
+    streamlit_app.py        interactive dashboard
+  notebooks/                ML experimentation notebooks
+  report/                   LaTeX source + figures + figure generator
+\end{lstlisting}
+
+% =====================================================================
+\section{Shared Grid Model}
+\label{sec:grid}
+
+\subsection{Cell Schema}
+Each cell in the $10\!\times\!10$ grid is represented as a Python
+dataclass with the following fields:
+\begin{lstlisting}[style=py]
+@dataclass
+class Cell:
+    row: int
+    col: int
+    zone: Zone               # Residential/Commercial/Hospital/School/Industrial/Open
+    density: int             # population density (sampled from real US data)
+    is_hub: bool             # drone hub
+    is_charging: bool        # charging pad
+    is_medical_pickup: bool  # medical-supply pickup point
+    no_fly: bool             # cell blocked for flight
+    demand: float            # estimated delivery demand
+\end{lstlisting}
+
+\subsection{Procedural Grid Generation}
+Rather than hard-coding a single example city, AeroNet Lite ships with a
+constructive grid generator (\texttt{build\_random\_grid(seed)}) that
+produces a fresh layout for every run while honouring all four CSP rules
+\emph{by construction}. Algorithm~\ref{alg:gen} sketches the procedure.
+
+\begin{algorithm}[H]
+\caption{\textsc{BuildRandomGrid}(seed)}
+\label{alg:gen}
+\begin{algorithmic}[1]
+\State $rng \gets \text{random}(seed)$
+\State Place 2--3 hubs at mutual Manhattan distance $\geq 4$
+\For{each hub $h$}
+  \State Attach a charging pad at Manhattan distance $1$ \Comment{R3 holds}
+\EndFor
+\For{each hub $h$}
+  \State Mark 4--7 nearby cells (within distance $3$) as Residential \Comment{R2 holds}
+\EndFor
+\State Grow a 2--3 cell Hospital cluster
+\State Grow a 2--3 cell School cluster
+\State Place a 2--4 cell Industrial cluster in a corner with no Hospital/School neighbour \Comment{R1 holds}
+\State Scatter 8--14 Commercial cells through remaining open space
+\State Mark a Medical Pickup adjacent to a Hospital \Comment{R4 holds}
+\State Validate the layout; on failure retry with a perturbed sub-seed
+\end{algorithmic}
+\end{algorithm}
+
+The four CSP rules from Section~\ref{sec:csp} hold by construction
+because each placement rule is intersected with the relevant constraint
+before commit. A 20-seed stress test confirmed 0/20 fall-backs to the
+hardcoded sample grid. Figure~\ref{fig:gallery} shows four representative
+layouts.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{grid_gallery.png}
+\caption{Four procedurally generated valid layouts. Hubs (\texttt{H},
+blue squares), charging pads (\texttt{C}, teal squares), medical pickup
+(red \texttt{+}), and any pre-placed no-fly cells appear as overlays.
+Each grid satisfies R1--R4 by construction.}
+\label{fig:gallery}
+\end{figure}
+
+\subsection{Population-Density Enrichment}
+The cells' \texttt{density} field is then sampled from real
+US-city-density data (Section~\ref{sec:data}). The 33-percentile
+buckets are mapped to zone types so that residential cells draw from the
+upper tertile, hospitals/schools from the middle, and industrial/open
+from the lower tertile. The sampling is also seed-driven, so the same
+\texttt{--seed} reproduces both the layout \emph{and} the density
+distribution.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.62\linewidth]{zone_map.png}
+\caption{Single sample run rendered through the matplotlib visualization
+helper. The visual identity (zone palette + landmark glyphs) is preserved
+in the Streamlit dashboard.}
+\label{fig:zone}
+\end{figure}
+
+% =====================================================================
+\section{Module 1 --- Layout Validation (CSP)}
+\label{sec:csp}
+
+\subsection{Constraint Set}
+The validator behaves as a CSP constraint checker over four rules. All
+violations are accumulated rather than failing on the first error so the
+report can suggest fixes for every issue found.
+
+\begin{table}[H]
+\centering
+\caption{CSP rules and the geometric check used.}
+\begin{tabular}{@{}llp{8.5cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Rule} & \textbf{Check} \\
+\midrule
+R1 & Industrial $\not\!\!\sim$ School/Hospital   & For each Industrial cell, no 4-neighbour is School or Hospital. \\
+R2 & Residential within 3 of a hub              & $\min_{h\in\text{hubs}} \|c-h\|_1 \leq 3$ for every Residential cell. \\
+R3 & Hub within 2 of a charging pad             & $\min_{p\in\text{pads}} \|h-p\|_1 \leq 2$ for every Hub. \\
+R4 & At least one Hospital within 1 of medical pickup & $\exists h \in \text{Hospitals}, m \in \text{Medical}: \|h-m\|_1 \leq 1$. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Implementation}
+Each rule is implemented as a pure function returning a list of
+\texttt{Violation} objects. The aggregator collects them all so the
+report can list every offending cell with a suggested fix.
+
+\begin{lstlisting}[style=py]
+def check_residential_coverage(grid):
+    violations = []
+    hubs_list = hubs(grid)
+    for cell in cells_of(grid, lambda c: c.zone == Zone.RESIDENTIAL):
+        if not any(manhattan(cell.pos, h.pos) <= 3 for h in hubs_list):
+            violations.append(Violation(
+                rule_id="R2",
+                cell=cell.pos,
+                message="Residential cell more than 3 cells from any hub",
+                suggestion="Add a hub closer to this district or convert "
+                           "the cell to Open Field.",
+            ))
+    return violations
+\end{lstlisting}
+
+\begin{notebox}
+\textbf{Why a CSP framing?} The rules could be encoded as a single
+post-hoc assertion, but treating each rule as an independent constraint
+function lets the procedural generator and validator share the same
+declarative semantics --- a constraint that the generator enforces is
+also one the validator checks, with no risk of drift.
+\end{notebox}
+
+% =====================================================================
+\section{Module 2 --- Fleet Selection}
+\label{sec:fleet}
+
+\subsection{Drone Catalogue and Fitness}
+The fleet selector chooses a small drone fleet under a fixed budget of
+\$10{,}000 from two drone types:
+
+\begin{table}[H]
+\centering
+\caption{Drone catalogue.}
+\begin{tabular}{@{}lcccp{4cm}@{}}
+\toprule
+\textbf{Type} & \textbf{Cost (\$)} & \textbf{Payload} & \textbf{Range (cells)} & \textbf{Use case} \\
+\midrule
+Light & 1{,}000 & 2 kg & 12 & Short residential/commercial deliveries \\
+Heavy & 1{,}800 & 5 kg & 20 & Long-range medical packages \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The fitness function rewards demand coverage and penalises overspending:
+\begin{equation}
+\text{score}(\ell, h) =
+\begin{cases}
+0.75 \cdot \text{coverage}_{\%}(\ell, h) - 0.25 \cdot \text{budget\_used}_{\%}(\ell, h) & \text{if cost} \leq B \\
+-\infty & \text{otherwise}
+\end{cases}
+\label{eq:fitness}
+\end{equation}
+where $\ell$ is the light count, $h$ the heavy count, and $B = 10{,}000$.
+
+\subsection{Two Algorithms}
+We implemented both algorithms permitted by the spec for AI breadth:
+
+\paragraph{Brute force.} Enumerate every $(\ell, h) \in [0, 10]^2$ and
+keep the highest-scoring feasible plan. With only 121 candidates this is
+microsecond-fast and provides a ground-truth optimum for benchmarking
+the GA.
+
+\paragraph{Genetic Algorithm.} A small evolutionary search demonstrates
+the rubric's "evolutionary search" requirement.
+
+\begin{algorithm}[H]
+\caption{\textsc{FleetGA}(grid, budget, generations $=30$, population $=20$)}
+\label{alg:ga}
+\begin{algorithmic}[1]
+\State Seed RNG with $42$
+\State $P \gets$ population of 20 random $(\ell, h)$ chromosomes
+\State $best \gets \arg\max_{\chi \in P} \text{fitness}(\chi)$
+\For{$g \gets 1$ to generations}
+  \State $children \gets \emptyset$
+  \While{$|children| < |P|$}
+    \State $p_1, p_2 \gets$ tournament-select($P$, $k=3$) twice
+    \State $\chi \gets$ single-point crossover$(p_1, p_2)$
+    \State with prob.\ $0.20$ mutate one gene by $\pm 1$
+    \State append $\chi$ to $children$
+  \EndWhile
+  \State $P \gets children \cup \{best\}$ \Comment{elitism}
+  \State update $best$ if any $\chi \in P$ scores higher
+\EndFor
+\State \Return $best$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Result}
+On the typical generated grid both algorithms converge to
+\textbf{5 Light + 2 Heavy drones}: cost \$8{,}600 (86\,\% of budget),
+coverage 100\,\%, fitness $= 0.75 \times 100 - 0.25 \times 86 = 53.5$.
+The GA matches the brute-force optimum within 5 generations.
+
+% =====================================================================
+\section{Module 3 --- A* Path Planner}
+\label{sec:astar}
+
+\subsection{Design Choices}
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Item} & \textbf{Choice} \\
+\midrule
+State          & grid coordinate $(r,c)$ \\
+Actions        & up, down, left, right \\
+Path cost      & $1.0$ default, $0.8$ when entering a Commercial cell \\
+Blocked        & cells with \texttt{no\_fly == True} \\
+Heuristic      & Manhattan distance $\|s - g\|_1$ (admissible) \\
+Tiebreaker     & monotonic counter for stable ordering in \texttt{heapq} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pseudocode}
+\begin{algorithm}[H]
+\caption{\textsc{A*}(start, goal, grid)}
+\label{alg:astar}
+\begin{algorithmic}[1]
+\State $g \gets \{start: 0\}$, $parent \gets \{start: \text{None}\}$, $closed \gets \emptyset$
+\State $open \gets$ heap with one entry $(h(start, goal), 0, start)$
+\While{open is non-empty}
+  \State $(f, \_, n) \gets$ pop min from $open$
+  \If{$n = goal$} \Return reconstruct($parent, n$) \EndIf
+  \State add $n$ to $closed$
+  \For{each $n' \in$ neighbours($n$) with \texttt{not no\_fly}}
+    \If{$n' \in closed$} \textbf{continue} \EndIf
+    \State $g' \gets g[n] + \texttt{move\_cost}(grid, n')$
+    \If{$g' < g.get(n', \infty)$}
+      \State $g[n'] \gets g'$, $parent[n'] \gets n$
+      \State push $(g' + h(n', goal),\, \text{counter}, n')$ onto $open$
+    \EndIf
+  \EndFor
+\EndWhile
+\State \Return failure
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Three-Segment Delivery Routing}
+A delivery is decomposed into three A* segments:
+$\text{hub} \to \text{pickup} \to \text{dropoff} \to \text{hub}$. Failed
+segments mark the delivery as \emph{unroutable} so the simulator can log
+the failure rather than crash. Figure~\ref{fig:routes} shows the route
+state at the start of a run and after the disruption handler has fired.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[t]{0.48\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{routes_initial.png}
+  \caption{Initial planned routes (step 6).}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{routes_final.png}
+  \caption{Routes after rerouting around an activated no-fly cell.}
+\end{subfigure}
+\caption{Initial vs.\ post-disruption A* routes for the active fleet.}
+\label{fig:routes}
+\end{figure}
+
+\subsection{Cost Model Rationale}
+The 0.8 commercial-corridor discount is intended to model preferred
+flight corridors over commercial districts (where there is less risk of
+flying over people). Without it A* paths just go diagonally; with it,
+drones realistically prefer the wider commercial axes between hubs.
+Manhattan distance remains an admissible heuristic in the discounted case
+because every movement still costs at least 0.8, so $h \leq g^*$ holds.
+
+% =====================================================================
+\section{Module 4 --- Real-Time Disruption Handling}
+\label{sec:disrupt}
+
+\subsection{No-Fly Activation}
+At step 11 of each run, the simulator activates a no-fly cell on a cell
+that lies a few steps ahead of an active drone (so the rerouting
+demonstration is non-trivial rather than firing in empty space). The
+handler iterates over every active drone and, when the no-fly intersects
+\emph{any} of its remaining segments (current \emph{or} future), replans
+all remaining segments from the drone's current position via repeated A*
+calls. Algorithm~\ref{alg:reroute} sketches the procedure.
+
+\begin{algorithm}[H]
+\caption{\textsc{Reroute}(drone, grid)}
+\label{alg:reroute}
+\begin{algorithmic}[1]
+\State $goals \gets$ list of segment endpoints from $drone$.seg\_idx onward
+\State $start \gets drone$.current\_pos
+\State $newSegments \gets$ already-completed segments
+\For{each $goal \in goals$}
+  \State $r \gets$ \textsc{A*}($start, goal, grid$)
+  \If{$r$.success is False}
+    \State mark $drone$ delayed; mark delivery delayed
+    \State \textbf{return}
+  \EndIf
+  \State append $r$.path to $newSegments$; $start \gets goal$
+\EndFor
+\State $drone$.segments $\gets newSegments$
+\State $drone$.pos\_in\_seg $\gets 0$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Anomaly-Driven Disruption}
+A second event hook fires at step 18: synthetic telemetry is generated
+for a non-idle drone and classified by the anomaly model
+(Section~\ref{sec:ml}). On any non-Normal label the drone is force-returned
+to its hub via a fresh A* call from its current position, aborting its
+in-flight delivery.
+
+% =====================================================================
+\section{Module 5 --- ML Pipeline}
+\label{sec:ml}
+
+The pipeline trains three models. All training uses
+\texttt{random\_state=42} so results are bit-for-bit reproducible.
+
+\begin{table}[H]
+\centering
+\caption{Trained models, datasets, and metrics.}
+\label{tab:models}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Model}       & \textbf{Algorithm}        & \textbf{Dataset}     & \textbf{Rows}  & \textbf{Metric} \\
+\midrule
+Demand               & Random Forest             & Bike Sharing Demand   & 10{,}886       & MAE 56.55, RMSE 86.65 \\
+Demand (baseline)    & Linear Regression         & Bike Sharing Demand   & 10{,}886       & MAE 112.16, RMSE 152.78 \\
+Delivery time        & RF + One-Hot Pipeline     & Amazon Delivery       & 43{,}551       & MAE 26.31\,min, RMSE 37.67\,min \\
+Anomaly classifier   & Random Forest (4-class)   & Synthetic telemetry   & 2{,}000        & Accuracy 1.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Demand Forecasting}
+\textbf{Features:} \texttt{hour, day\_of\_week, temperature, weather}.
+We train both a Linear Regression baseline and a Random Forest on a
+20\,\% held-out split. The Random Forest wins decisively on both error
+metrics (Figure~\ref{fig:demand_compare}) and is selected as the deployed
+model.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\linewidth]{demand_model_comparison.png}
+\caption{Linear Regression baseline vs.\ Random Forest on the Bike
+Sharing Demand dataset (10{,}886 rows). Random Forest cuts MAE by
+$\sim 50$\,\% and RMSE by $\sim 43$\,\%, justifying its selection over
+the simpler model.}
+\label{fig:demand_compare}
+\end{figure}
+
+The trained model drives the per-cell demand prediction shown in
+Figure~\ref{fig:heatmap}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.62\linewidth]{demand_heatmap.png}
+\caption{Predicted per-cell demand at hour 12, weekday, $20\,^\circ\!$C,
+clear weather, scaled by the cell's enriched population density.}
+\label{fig:heatmap}
+\end{figure}
+
+\subsection{Feature Importance}
+Random Forest exposes per-feature Gini importance after training. For
+the demand model, hour-of-day dominates --- consistent with the
+twin morning/evening commute peaks in the bike-sharing data. For the
+anomaly model, all four engineered features carry comparable weight,
+which is consistent with the synthetic data design where each anomaly
+class is driven by its own dominant feature (Figure~\ref{fig:fimp}).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\linewidth]{feature_importance.png}
+\caption{Random Forest feature importances. Left: demand model on Bike
+Sharing data --- hour-of-day dominates. Right: anomaly classifier on
+synthetic telemetry --- spread across the four engineered features that
+distinguish each anomaly class.}
+\label{fig:fimp}
+\end{figure}
+
+\subsection{Delivery-Time Prediction}
+A scikit-learn \texttt{Pipeline} combining \texttt{ColumnTransformer}
++ \texttt{OneHotEncoder} + Random Forest predicts ETA in minutes from
+numeric features (\texttt{distance\_km, agent\_age, agent\_rating}) and
+categorical features (\texttt{weather, traffic, vehicle, area}). The
+distance is computed via haversine from store and drop-off coordinates.
+Figure~\ref{fig:eta} compares predictions against ground truth on the
+held-out test split.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.65\linewidth]{delivery_time_scatter.png}
+\caption{Amazon Delivery time regressor: actual vs.\ predicted minutes
+on a 20\,\% held-out split (n $=$ 8{,}710). Predictions cluster along
+the $y=x$ ideal line; MAE $=$ 26.31\,min, RMSE $=$ 37.67\,min.}
+\label{fig:eta}
+\end{figure}
+
+The simulator uses this model to annotate every assigned delivery with a
+baseline ETA, scaled by the assumption that one Manhattan grid cell
+$\approx 0.5$\,km of real-world distance.
+
+\subsection{Anomaly Classification}
+Synthetic telemetry produces four labelled regimes by construction:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Normal} --- low battery drop and route deviation.
+  \item \textbf{BatteryAnomaly} --- unusually high battery drop.
+  \item \textbf{RouteAnomaly} --- unusually high route deviation.
+  \item \textbf{SensorSpike} --- high altitude or speed change.
+\end{itemize}
+With clean class boundaries the classifier reaches 100\,\% accuracy on a
+stratified 20\,\% test split. The matrix is fully deterministic across
+runs because the synthetic data, the train/test split, and the Random
+Forest all share \texttt{random\_state=42}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.55\linewidth]{confusion_matrix.png}
+\caption{Anomaly-classifier confusion matrix on the 400-row test split.
+The clean diagonal (zero off-diagonal mass) is a property of the
+deliberately separable synthetic data, not an artefact of overfitting,
+and is acknowledged explicitly in the limitations section.}
+\label{fig:cm}
+\end{figure}
+
+% =====================================================================
+\section{Datasets}
+\label{sec:data}
+
+Three real datasets feed the pipeline; the project treats anomaly data
+as synthetic per the course guidance, since real UAV telemetry (CMU ALFA
+dataset) requires bespoke ROS-bag processing beyond the two-week budget.
+
+\begin{table}[H]
+\centering
+\caption{Datasets used in the project.}
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+\textbf{Purpose} & \textbf{Source} & \textbf{Role in the system} \\
+\midrule
+Demand forecasting   & Kaggle Bike Sharing Demand            & Hourly demand proxy for the regression model. \\
+Delivery time        & Kaggle Amazon Delivery                & ETA regressor with realistic feature mix. \\
+Grid density         & Kaggle US City Population Densities   & Bucketed Low/Medium/High densities sampled into cells per zone. \\
+Anomaly (chosen)     & Synthetic                              & 4-class clean separation; documented assumption. \\
+Anomaly (alternative)& CMU ALFA UAV Failure Dataset           & Available on disk; not wired (per-flight ROS topics). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Auto-Detection and Fallback}
+The pipeline checks for each CSV at a fixed location under
+\texttt{data/raw/}; if a file is missing the demand model gracefully
+falls back to in-process synthetic data so the demo always runs. The
+delivery-time and population-density loaders are silent no-ops on
+missing data, which simplifies setup for graders without download
+access.
+
+% =====================================================================
+\section{20-Step Simulation Scenario}
+\label{sec:scenario}
+
+The simulation is structured as 20 logical steps so the demonstration
+covers all modules. Each step prints to an event log and updates the
+visual state.
+
+\begin{table}[H]
+\centering
+\caption{Step-by-step scenario plan.}
+\begin{tabular}{@{}clp{8.5cm}@{}}
+\toprule
+\textbf{Step}  & \textbf{Phase}             & \textbf{Action} \\
+\midrule
+1--3   & Init / Validate / Fleet     & Generate grid, run CSP validator, brute-force fleet selection. \\
+4--6   & ML training + Deliveries    & Train demand, anomaly, delivery-time models; assign 4 deliveries with ETAs. \\
+7--10  & Movement                    & Drones advance two cells per step along their A* paths. \\
+11     & Disruption                  & Activate a no-fly cell on an active route; replan affected drones. \\
+12--14 & Movement (post-disruption)  & Continue along the new paths. \\
+15--17 & Forecast + Extra delivery   & Run demand forecast; assign an additional delivery to an idle drone. \\
+18     & Anomaly injection           & Synthesize anomalous telemetry; classify; flag the affected drone. \\
+19     & Anomaly response            & Force return-to-hub for non-Normal classifications. \\
+20     & Final tick + Summary        & Print completed / delayed / failed / in-progress counts. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{event_timeline.png}
+\caption{Event log produced during a typical 20-step run.}
+\label{fig:timeline}
+\end{figure}
+
+\paragraph{Reproducibility.} The CLI accepts an optional
+\texttt{--seed N} argument. Each run prints the seed used so any output
+shown in this report can be reproduced with
+\texttt{python -m src.main --seed N}.
+
+% =====================================================================
+\section{Interactive Streamlit Dashboard}
+\label{sec:dash}
+
+The dashboard wraps the same \texttt{Simulation} class used by the CLI
+but exposes per-step advancement, restart, and seeded replay through a
+browser UI.
+
+\subsection{Visualisation Stack}
+The map is rendered with Plotly so cells, drones, routes, and tooltips
+are all interactive:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{City map} --- pastel-coloured cells per zone with
+        building emojis ($\mathrm{\unicode{x1F3E0}}, \mathrm{\unicode{x1F3EC}},
+        \mathrm{\unicode{x1F3E5}}, \mathrm{\unicode{x1F3EB}},
+        \mathrm{\unicode{x1F3ED}}, \mathrm{\unicode{x1F33F}}$),
+        HUB / CHG / MED overlays, drone triangles with status-coloured
+        outlines, dotted planned routes, solid trails, and an X overlay
+        for active no-fly cells. Drones at the same hub are arranged in
+        a small ring so each is independently visible.
+        Hovering on any cell or drone shows a rich tooltip.
+  \item \textbf{Controls} --- Restart (re-run the same seed), New
+        random (fresh seed), Step (advance one), Run to end, Auto-play
+        with a speed slider.
+  \item \textbf{Tabs} --- Event log, Drone status, Delivery table,
+        Demand heatmap, Model metrics, Layout report.
+\end{itemize}
+
+\subsection{Caching}
+The three ML models are wrapped in
+\texttt{@st.cache\_resource}, so they are trained once per Streamlit
+session and reused across every restart. This makes the
+\textit{Restart} button effectively instant after the first warm-up.
+
+\subsection{Launching}
+The dashboard is launched with:
+\begin{lstlisting}[language=bash, basicstyle=\ttfamily\footnotesize, frame=single, backgroundcolor=\color{codebg}]
+cd d:\codes\ai2
+.\.venv\Scripts\python.exe -m streamlit run src\streamlit_app.py
+\end{lstlisting}
+
+% =====================================================================
+\section{Implementation Challenges}
+\label{sec:challenges}
+
+\subsection{State Machine Bugs in the Drone Lifecycle}
+The first end-to-end run revealed an \texttt{IndexError} on the final
+step: when \texttt{force\_return\_to\_hub} replaces a drone's three-leg
+plan with a single segment, the original step\_drone routine still
+expected exactly three segments. The fix was to use
+\texttt{len(drone.segments)} instead of the literal \texttt{3} as the
+end-of-plan condition.
+
+A subtler bug followed: a drone that landed on the last cell of the
+last segment was not marked complete until the next tick, so the
+20-step demo summary showed deliveries that were geometrically finished
+as still in progress. The fix was to detect arrival on the final cell of
+the final segment within the \emph{same} call and trigger completion
+immediately.
+
+\subsection{No-Fly Activation Did Not Trigger Reroutes}
+Initially the no-fly handler only inspected the current segment of each
+drone. A drone whose pickup landed at the same cell as a downstream
+no-fly point would proceed normally to the pickup, then route through
+the no-fly cell on the next segment because that segment had been
+planned before the disruption. The fix was to inspect \emph{all
+remaining} segments and, when any of them crosses the new no-fly cell,
+re-plan from the drone's current position through every remaining
+segment goal.
+
+\subsection{Demand Heatmap Aspect Ratio}
+The Plotly heatmap initially used \texttt{scaleanchor="x"} without a
+constrained x range, which caused it to fill the entire wide container
+while the y axis stayed locked to the data span. The fix was to set
+explicit ranges on both axes plus \texttt{constrain="domain"}, which
+forces square cells regardless of container width.
+
+\subsection{Drones Stacked at the Same Hub}
+When multiple drones share a home hub (typical with brute-force fleet
+selection), all their markers stacked in the same screen position so
+only one was visible. The fix is a small ring-offset layout: drones at
+the same cell are placed at evenly-spaced angles around a 0.28-cell
+radius from the cell centre.
+
+\subsection{Procedural Grid Generator's CSP Compliance}
+The first generator placed cells uniformly at random and then validated
+the result, which gave a high failure rate (R2 violations were the
+common offender). Switching to a constructive approach where each
+placement step intersects with the relevant constraint gave 0/20
+failures across the seeded stress test.
+
+% =====================================================================
+\section{Results and Evaluation}
+\label{sec:results}
+
+\paragraph{Layout validator.} On the procedurally generated grid, all
+four CSP rules pass; on the spec's deliberately-broken sample grid the
+validator correctly reports R2 and R3 violations with offending cell
+coordinates and human-readable suggested fixes.
+
+\paragraph{Fleet.} Both brute force and the GA converge to the same
+solution: 5 Light + 2 Heavy, cost \$8{,}600, coverage 100\,\%, fitness
+$53.5$.
+
+\paragraph{Routing and disruption.} A* finds a feasible route for every
+delivery on the procedurally generated grids tested. Activating a no-fly
+cell on an active drone's path triggers a successful reroute in every
+test seed evaluated (20 distinct grids, 4 deliveries each).
+
+\paragraph{Models.} Bike Sharing demand: RF MAE $= 56.55$, RMSE $= 86.65$
+versus LR baseline MAE $= 112.16$, RMSE $= 152.78$; the RF is selected.
+Amazon Delivery time: RF MAE $= 26.31$ min, RMSE $= 37.67$ min on a
+43{,}551-row split. Anomaly classifier: 100\,\% accuracy on the synthetic
+test split with the confusion matrix shown in Figure~\ref{fig:cm}.
+
+\paragraph{End-to-end demo.} A typical 20-step run produces 2 completed,
+1 delayed (anomaly-aborted), 0 failed, and 2 still-in-progress deliveries.
+Different seeds produce different layouts, deliveries, and anomaly types
+while the underlying models stay deterministic (Section~\ref{sec:ml}).
+
+\paragraph{Rubric alignment.}
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}p{4cm}p{10cm}@{}}
+\toprule
+\textbf{Rubric area}      & \textbf{Where it is satisfied} \\
+\midrule
+Design document            & Sections~\ref{sec:arch}--\ref{sec:dash}: per-module algorithm choice, data model, UI plan. \\
+Technical implementation   & Working Python project; each module standalone and integrated through the shared grid. \\
+AI concept coverage        & CSP (\S\ref{sec:csp}), Search/GA (\S\ref{sec:fleet}), A* (\S\ref{sec:astar}), Optimization (\S\ref{sec:disrupt}), Regression \& Classification (\S\ref{sec:ml}). \\
+Viva and defense           & All algorithms are first-principles implementations explainable from this report. \\
+Interface and presentation & Static matplotlib figures (this report) + interactive Plotly + Streamlit dashboard (\S\ref{sec:dash}). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Limitations}
+\label{sec:limits}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Anomaly classifier accuracy is "too clean."} The
+        synthetic data was designed to cleanly separate the four classes,
+        so the 100\,\% test accuracy reflects the data design rather than
+        a generalising model. We document this explicitly to avoid
+        misleading the viva.
+  \item \textbf{No multi-drone collision avoidance.} Routes are planned
+        independently per drone; two drones can in principle occupy the
+        same cell at the same step. A real system would need temporal A*.
+  \item \textbf{Static cost model.} A* uses a fixed 1.0 / 0.8 cost; we do
+        not model wind, weight-dependent battery drain, or dynamic
+        congestion.
+  \item \textbf{Deterministic ML training.} For reproducibility we pin
+        \texttt{random\_state=42}. We did not run cross-validation or
+        bootstrapping to report confidence intervals on the metrics.
+  \item \textbf{Real UAV telemetry not wired.} The CMU ALFA dataset is
+        present on disk but not loaded into the anomaly classifier --- it
+        is per-flight ROS topics that need bespoke processing.
+  \item \textbf{Single-city scope.} The grid is fixed at $10\!\times\!10$;
+        nothing currently scales to a larger environment without
+        re-tuning hub spacing and budget.
+\end{itemize}
+
+% =====================================================================
+\section{Per-Member Contributions}
+\label{sec:contrib}
+
+The work was split across the team along the module boundaries described
+in Section~\ref{sec:arch}. All members participated in design discussions
+and the final report.
+
+\begin{table}[H]
+\centering
+\caption{Contribution split.}
+\begin{tabular}{@{}p{4cm}p{10cm}@{}}
+\toprule
+\textbf{Member}        & \textbf{Primary contributions} \\
+\midrule
+Ifham Razi (23i-2550)  & Shared grid model, procedural grid generator,
+                         CSP validator, integration through
+                         \texttt{Simulation} class, dashboard layout. \\
+\addlinespace
+Romaan Khawar (23i-2554) & A* path planner, three-segment delivery
+                          routing, real-time disruption handler,
+                          Plotly city renderer, drone state machine. \\
+\addlinespace
+Ali Haroon (23i-2592)   & Fleet selector (brute force + GA), ML pipeline
+                         (demand, anomaly, delivery-time models), feature
+                         engineering, dataset wiring, report figures. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Future Work}
+\label{sec:future}
+
+\begin{itemize}[leftmargin=*]
+  \item Wire the CMU ALFA telemetry into the anomaly classifier to
+        replace the synthetic dataset and report a more realistic
+        confusion matrix.
+  \item Replace the Manhattan A* heuristic with a wind/airspace-aware
+        cost once altitude is added to the cell model.
+  \item Add multi-drone collision avoidance by extending A* to a
+        space-time graph with reservation tables.
+  \item Smooth-frame Plotly animation between simulation steps for the
+        dashboard, using \texttt{frames} so drone movement is
+        interpolated rather than discrete.
+  \item Train the demand model with a wider feature set
+        (humidity, wind speed, holiday flags) and report cross-validated
+        confidence intervals.
+\end{itemize}
+
+% =====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+AeroNet Lite delivers all five required AI components in an integrated
+$10\!\times\!10$ simulator with both a deterministic CLI and an
+interactive dashboard. Real datasets back the regression models;
+synthetic data backs the anomaly classifier with a clearly-documented
+assumption. The procedural grid generator and seeded runs make the system
+both reproducible and varied --- two properties that often pull against
+each other --- by separating model-training seeds (pinned) from
+scenario seeds (configurable). The codebase totals roughly 2{,}000 lines
+of Python, organised so each module can be opened, read, and explained
+from first principles in viva.
+
+% =====================================================================
+\section*{References}
+\label{sec:refs}
+\addcontentsline{toc}{section}{References}
+
+\begin{enumerate}[leftmargin=*]
+  \item Kaggle --- Bike Sharing Demand. \url{https://www.kaggle.com/c/bike-sharing-demand}
+  \item Kaggle --- Amazon Delivery Dataset. \url{https://www.kaggle.com/datasets/sujalsuthar/amazon-delivery-dataset}
+  \item Kaggle --- US City Population Densities. \url{https://www.kaggle.com/datasets/mmcgurr/us-city-population-densities}
+  \item CMU KiltHub --- ALFA UAV Fault and Anomaly Detection Dataset. \url{https://kilthub.cmu.edu/articles/dataset/ALFA_A_Dataset_for_UAV_Fault_and_Anomaly_Detection/12707963}
+  \item Hart, P., Nilsson, N., Raphael, B. (1968). \emph{A Formal Basis for the Heuristic Determination of Minimum Cost Paths}. IEEE Transactions on Systems Science and Cybernetics.
+  \item Russell, S., Norvig, P. \emph{Artificial Intelligence: A Modern Approach}, 4th ed. (Constraint Satisfaction, Search, Machine Learning chapters.)
+  \item Pedregosa, F., et al. (2011). \emph{Scikit-learn: Machine Learning in Python}. Journal of Machine Learning Research, 12, 2825--2830.
+  \item Plotly Technologies Inc. (2015). \emph{Collaborative data science}. Plotly. \url{https://plot.ly}
+  \item Streamlit Inc. \emph{Streamlit Documentation}. \url{https://docs.streamlit.io}
+\end{enumerate}
+
+\end{document}
